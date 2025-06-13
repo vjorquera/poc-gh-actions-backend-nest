@@ -1,0 +1,132 @@
+name: Dev Environment - Build and Deploy
+
+# Trigger: todas las ramas excepto main (equivalente al trigger de Azure DevOps)
+on:
+  push:
+    branches:
+      - '*'
+      - '!main'
+  workflow_dispatch: # Permite ejecución manual
+
+# Permisos necesarios para GitHub Container Registry
+permissions:
+  contents: read
+  packages: write
+
+env:
+  # Variables para build y deploy usando GitHub Container Registry
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+  APP_NAME: poc-gh-actions-backend-dev
+  RESOURCE_GROUP: rg-transversal-dev
+
+jobs:
+  build:
+    name: Build and Push
+    runs-on: ubuntu-latest
+    environment: development
+    outputs:
+      image-tag: ${{ steps.meta.outputs.tags }}
+      image-digest: ${{ steps.build.outputs.digest }}
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      # Equivalente al template generate-env-file.yml
+      - name: Generate environment file
+        run: |
+          echo "Generating .env file from GitHub Secrets..."
+          
+          # Crear archivo .env con todas las variables de entorno necesarias
+          cat > .env << EOF
+          # Variables de entorno generadas automáticamente
+          NODE_ENV=development
+          BACKEND_ENV=dev
+          BACKEND_APP_VERSION=${{ github.run_number }}
+          BACKEND_BUILD_ID=${{ github.run_number }}
+          
+          # Variables específicas del proyecto
+          MICROSOFT_CLIENT_ID=${{ secrets.MICROSOFT_CLIENT_ID_DEV }}
+          MICROSOFT_CLIENT_SECRET=${{ secrets.MICROSOFT_CLIENT_SECRET_DEV }}
+          MICROSOFT_TENANT_ID=${{ secrets.MICROSOFT_TENANT_ID_DEV }}
+          
+          EOF
+          
+          echo "Generated .env file contents:"
+          cat .env
+        shell: bash
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract metadata for Docker
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=raw,value=${{ github.run_number }}
+            type=raw,value=latest
+            type=ref,event=branch
+
+      # Equivalente al template build-publish-docker-v2.yml
+      - name: Build and push Docker image
+        id: build
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: ./Dockerfile
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          platforms: linux/amd64
+
+      - name: Output image details
+        run: |
+          echo "Image built and pushed successfully!"
+          echo "Tags: ${{ steps.meta.outputs.tags }}"
+          echo "Digest: ${{ steps.build.outputs.digest }}"
+          echo "Registry: ${{ env.REGISTRY }}"
+
+  deploy:
+    name: Deploy to Azure App Service
+    runs-on: ubuntu-latest
+    needs: build
+    environment: development
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Log in to Azure
+        uses: azure/login@v1
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS_DEV }}
+
+      # Equivalente al task AzureWebAppContainer@1
+      - name: Deploy to Azure App Service
+        uses: azure/webapps-deploy@v2
+        with:
+          app-name: ${{ env.APP_NAME }}
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.run_number }}
+
+      - name: Verify deployment
+        run: |
+          echo "Deployment completed successfully!"
+          echo "Application URL: https://${{ env.APP_NAME }}.azurewebsites.net"
+          echo "Image deployed: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.run_number }}"
+          echo "Resource Group: ${{ env.RESOURCE_GROUP }}"
+
+      - name: Azure logout
+        run: az logout
+        if: always() 
